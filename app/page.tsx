@@ -27,10 +27,30 @@ export default function Home() {
   const [ready, setReady] = useState(false);
   const [det, setDet] = useState<DetectState>({ fps: 0, hands: 0 });
   const [currentText, setCurrentText] = useState("");
-  const [autoSpeak, setAutoSpeak] = useState(false); // default OFF to avoid spam
+  const [autoSpeak, setAutoSpeak] = useState(false);
   const [fontSize, setFontSize] = useState(28);
   const [highContrast, setHighContrast] = useState(true);
   const [pushToSpeak, setPushToSpeak] = useState(false);
+
+  // TTS unlock (Chrome requires a user gesture)
+  const [ttsReady, setTtsReady] = useState(false);
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const u = new SpeechSynthesisUtterance(""); // prime engine
+        window.speechSynthesis.speak(u);
+      } catch {}
+      setTtsReady(true);
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
 
   // gesture gating + cooldowns
   const lastSpokenAtRef = useRef(0);
@@ -73,6 +93,23 @@ export default function Home() {
   const HOLD_MS = 800;
   const REPEAT_COOLDOWN = 1400;
 
+  // auto-speak fingerspelling after idle
+  const lastTypedAtRef = useRef(0);
+  useEffect(() => {
+    let id: number;
+    const loop = () => {
+      const now = performance.now();
+      if (autoSpeak && ttsReady && spell && now - lastTypedAtRef.current > 1200) {
+        speak(spell);
+        setCurrentText(spell);
+        lastTypedAtRef.current = now + 1e7; // prevent immediate repeat
+      }
+      id = window.setTimeout(loop, 200) as unknown as number;
+    };
+    loop();
+    return () => clearTimeout(id);
+  }, [autoSpeak, ttsReady, spell]);
+
   // teach-a-letter 3s window
   const [capLetter, setCapLetter] = useState("A");
   const [capMsg, setCapMsg] = useState("");
@@ -107,7 +144,7 @@ export default function Home() {
       });
       await videoRef.current.play();
 
-      // 2) Model (created directly in VIDEO mode)
+      // 2) Model
       const resolver = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
       );
@@ -232,7 +269,7 @@ export default function Home() {
             setCurrentText(phrase);
 
             const canSpeak = autoSpeak && (!pushToSpeak || isHoldingRef.current);
-            if (canSpeak && now - lastSpokenAtRef.current > SPEAK_COOLDOWN) {
+            if (ttsReady && canSpeak && now - lastSpokenAtRef.current > SPEAK_COOLDOWN) {
               speak(phrase);
               lastSpokenAtRef.current = now;
             }
@@ -254,7 +291,10 @@ export default function Home() {
               lastAppendedRef.current === L.letter &&
               now - lastLetterAtRef.current < REPEAT_COOLDOWN;
             if (held >= HOLD_MS && !sameTooSoon) {
-              setSpell((s) => (s + L.letter).toLowerCase());
+              setSpell((s) => {
+                lastTypedAtRef.current = performance.now();
+                return (s + L.letter).toLowerCase();
+              });
               lastLetterAtRef.current = now;
               lastAppendedRef.current = L.letter;
               dwellStartRef.current = now + 9999; // force re-hold
@@ -298,7 +338,7 @@ export default function Home() {
     };
     // keep deps minimal so we don't re-init constantly
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [highContrast]);
+  }, [highContrast, autoSpeak, ttsReady, pushToSpeak]);
 
   // speak current text once
   const say = () => currentText && speak(currentText);
